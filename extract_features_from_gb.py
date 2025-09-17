@@ -10,7 +10,6 @@ from Bio import SeqIO, SeqFeature
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-
 def create_output_dirs(base_dir):
     dirs = {}
     for key in [
@@ -22,11 +21,9 @@ def create_output_dirs(base_dir):
         dirs[key] = path
     return dirs
 
-
 def clean_filename(name: str) -> str:
     """Replace '-' and '.' with '_' in filenames (excluding extensions)."""
     return name.replace("-", "_").replace(".", "_")
-
 
 def write_fasta(seq, label, feature_type, parent_dir, gb_stem):
     cleaned_label = clean_filename(label)
@@ -37,7 +34,6 @@ def write_fasta(seq, label, feature_type, parent_dir, gb_stem):
     with open(filepath, "w") as f:
         SeqIO.write(record, f, "fasta")
 
-
 def find_nearest_gene(position, gene_coords, direction):
     """Find nearest upstream/downstream gene from a list of (start,end,name,strand)."""
     if direction == 'upstream':
@@ -46,7 +42,6 @@ def find_nearest_gene(position, gene_coords, direction):
     else:  # downstream
         candidates = [g for g in gene_coords if g[0] >= position]
         return min(candidates, key=lambda x: x[0], default=None)
-
 
 def extract_intergenic(seq, start, end, label, gb_stem,
                        output_dirs, summary_rows,
@@ -67,7 +62,6 @@ def extract_intergenic(seq, start, end, label, gb_stem,
         source_file
     ])
     extracted_starts.add(start)
-
 
 def concatenate_exons(exon_dir, gb_stem):
     exon_folder = exon_dir / gb_stem
@@ -94,7 +88,6 @@ def concatenate_exons(exon_dir, gb_stem):
         output_path = exon_folder / f"{clean_filename(gene)}.fasta"
         with open(output_path, "w") as out:
             SeqIO.write(final_record, out, "fasta")
-
 
 def copy_filtered_files(output_dir):
     """
@@ -189,7 +182,6 @@ def copy_filtered_files(output_dir):
                             with open(log_path, "a") as log2:
                                 log2.write(f"Deleted duplicate (>=2 'copy'): {fasta.name}\n")
 
-
 def combine_to_3_combined(output_dir):
     for category in [
         "cds", "exons", "introns", "trna", "rrna",
@@ -215,32 +207,41 @@ def combine_to_3_combined(output_dir):
                 combined_file = combined_path / f"{clean_filename(subfolder.name)}.fasta"
                 SeqIO.write(records, combined_file, "fasta")
 
-
 def create_phylo_folder(output_dir):
     phylo_path = output_dir / "1_for_phylo_analysis"
     phylo_path.mkdir(parents=True, exist_ok=True)
     prefix_map = {
         "cds": "1_",
-        "exons": "",
         "rrna": "2_",
         "trna": "3_",
         "introns": "4_",
         "intergenic_spacers": "5_"
         # pseudogenes intentionally excluded
     }
+
+    # Copy for normal categories except exons
     for cat, prefix in prefix_map.items():
         src = output_dir / cat / "3_combined"
         if not src.exists():
             continue
         for f in src.glob("*.fasta"):
-            base = f.stem
-            if cat == "exons":
-                p = "3_" if base.startswith("trn") else "1_"
-            else:
-                p = prefix
-            new_name = f"{p}{clean_filename(base)}.fasta"
+            new_name = f"{prefix}{clean_filename(f.stem)}.fasta"
             shutil.copy(f, phylo_path / new_name)
 
+    # Special handling for exons: ensure ALL exons transferred
+    exon_src = output_dir / "exons" / "3_combined"
+    if exon_src.exists():
+        for f in exon_src.glob("*.fasta"):
+            base = f.stem
+            base_lc = base.lower()
+            if base_lc.startswith("trn"):
+                prefix = "3_"
+            elif base_lc.startswith("rrn"):
+                prefix = "2_"
+            else:
+                prefix = "1_"
+            new_name = f"{prefix}{clean_filename(base)}.fasta"
+            shutil.copy(f, phylo_path / new_name)
 
 def get_outer_gene_coords(gene_coords):
     """Keep only intervals not fully nested within another."""
@@ -250,7 +251,6 @@ def get_outer_gene_coords(gene_coords):
         if not any(o_start <= start and o_end >= end for o_start, o_end, _, _ in outer):
             outer.append((start, end, name, strand))
     return outer
-
 
 def process_gb_file(gb_file, output_dirs, summary_rows):
     record = SeqIO.read(gb_file, "genbank")
@@ -390,7 +390,7 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
                     )
             continue
 
-        # Default feature writing
+        # Default feature writing for CDS/tRNA/rRNA
         s, e = int(feat.location.start), int(feat.location.end)
         subseq = sequence[s:e]
         if strand == -1:
@@ -462,7 +462,6 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
     # concatenate any exon pieces written earlier
     concatenate_exons(output_dirs["exons"], gb_stem)
 
-
 def main():
     if len(sys.argv) != 3:
         print("Usage: python extract_features_from_gb.py <input_gb_dir> <output_dir>")
@@ -509,7 +508,6 @@ def main():
     create_phylo_folder(output_dir)
 
     print(f"\n✅ Done! All results saved in: {output_dir}")
-
 
 if __name__ == "__main__":
     main()
