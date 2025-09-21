@@ -10,6 +10,10 @@ from Bio import SeqIO, SeqFeature
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
+# ---------------------------
+# Helpers
+# ---------------------------
+
 def create_output_dirs(base_dir):
     dirs = {}
     for key in [
@@ -43,25 +47,57 @@ def find_nearest_gene(position, gene_coords, direction):
         candidates = [g for g in gene_coords if g[0] >= position]
         return min(candidates, key=lambda x: x[0], default=None)
 
-def extract_intergenic(seq, start, end, label, gb_stem,
+def _to_1based_inclusive(start0: int, end0: int):
+    """
+    Convert Biopython 0-based, half-open [start0, end0) to
+    1-based inclusive [start_csv, end_csv].
+    """
+    return start0 + 1, end0
+
+def _strand_symbol(strand_val):
+    """
+    Map Biopython strand to '+' or '-'.
+    Biopython uses 1 for forward, -1 for reverse, 0/None for unknown.
+    Unknown is treated as '+'.
+    """
+    return '+' if strand_val != -1 else '-'
+
+def _format_coords_for_csv(start0: int, end0: int, strand_val):
+    """
+    Return (Start, End) for CSV with:
+      - 1-based inclusive coordinates
+      - If reverse strand, write in reverse order (End .. Start)
+    """
+    s1, e1 = _to_1based_inclusive(start0, end0)
+    if strand_val == -1:
+        return e1, s1
+    return s1, e1
+
+def extract_intergenic(seq, start0, end0, label, gb_stem,
                        output_dirs, summary_rows,
                        source_file, extracted_starts):
-    """Extract and write an intergenic spacer only if its start coordinate hasn’t already been used."""
-    if end <= start or start in extracted_starts:
+    """
+    Extract and write an intergenic spacer only if its start coordinate hasn’t already been used.
+    start0/end0 are 0-based half-open; convert to 1-based inclusive for CSV.
+    Intergenic spacers are unstranded; keep '+' and normal order.
+    """
+    if end0 <= start0 or start0 in extracted_starts:
         return
-    spacer_seq = seq[start:end]
+    spacer_seq = seq[start0:end0]
     write_fasta(spacer_seq, label, "intergenic_spacers",
                 output_dirs["intergenic_spacers"], gb_stem)
+
+    start_csv, end_csv = _to_1based_inclusive(start0, end0)
     summary_rows.append([
         "intergenic_spacer",
         label,
-        start,
-        end,
+        start_csv,
+        end_csv,
         "+",
         len(spacer_seq),
         source_file
     ])
-    extracted_starts.add(start)
+    extracted_starts.add(start0)
 
 def concatenate_exons(exon_dir, gb_stem):
     exon_folder = exon_dir / gb_stem
@@ -252,6 +288,10 @@ def get_outer_gene_coords(gene_coords):
             outer.append((start, end, name, strand))
     return outer
 
+# ---------------------------
+# Core per-file processing
+# ---------------------------
+
 def process_gb_file(gb_file, output_dirs, summary_rows):
     record = SeqIO.read(gb_file, "genbank")
     sequence = record.seq
@@ -259,10 +299,7 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
 
     extracted_spacer_starts = set()
 
-    # ---------------------------
     # 1) Build initial coords for nearest-gene lookups (include pseudogene-only 'gene' features)
-    # Use display names WITHOUT the word 'pseudogene' for spacer labeling.
-    # ---------------------------
     initial_gene_counts = defaultdict(int)          # for CDS/tRNA/rRNA copies
     initial_pseudo_label_counts = defaultdict(int)  # for pseudogene boundary label copies
     initial_gene_coords = []
@@ -275,23 +312,20 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
             gene = feat.qualifiers.get("gene", ["unknown"])[0]
             initial_gene_counts[gene] += 1
             name = (f"{gene}_copy{initial_gene_counts[gene]}" if initial_gene_counts[gene] > 1 else gene)
-            s, e = int(feat.location.start), int(feat.location.end)
-            initial_gene_coords.append((s, e, name, feat.location.strand))
+            s0, e0 = int(feat.location.start), int(feat.location.end)
+            initial_gene_coords.append((s0, e0, name, feat.location.strand))
             continue
 
         # If a /pseudo 'gene' feature exists (no CDS/tRNA/rRNA), include as boundary
         if has_pseudo and feat.type == "gene":
             gene = feat.qualifiers.get("gene", ["unknown"])[0]
             initial_pseudo_label_counts[gene] += 1
-            # Label like other genes for spacers (NO 'pseudogene' in name)
             label_name = (f"{gene}_copy{initial_pseudo_label_counts[gene]}"
                           if initial_pseudo_label_counts[gene] > 1 else gene)
-            s, e = int(feat.location.start), int(feat.location.end)
-            initial_gene_coords.append((s, e, label_name, feat.location.strand))
+            s0, e0 = int(feat.location.start), int(feat.location.end)
+            initial_gene_coords.append((s0, e0, label_name, feat.location.strand))
 
-    # ---------------------------
     # 2) Iterate features to extract sequences
-    # ---------------------------
     gene_counts = defaultdict(int)                # CDS/tRNA/rRNA copy counts
     pseudogene_counts = defaultdict(int)          # for pseudogene FASTA naming
     pseudogene_label_counts = defaultdict(int)    # for spacer label naming (no 'pseudogene')
@@ -302,8 +336,8 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
         if "pseudo" in feat.qualifiers:
             gene = feat.qualifiers.get("gene", ["unknown"])[0]
             strand = feat.location.strand
-            s, e = int(feat.location.start), int(feat.location.end)
-            subseq = sequence[s:e]
+            s0, e0 = int(feat.location.start), int(feat.location.end)
+            subseq = sequence[s0:e0]
             if strand == -1:
                 subseq = subseq.reverse_complement()
 
@@ -311,13 +345,23 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
             pseudogene_counts[gene] += 1
             pseudo_seq_name = f"{gene}_pseudogene_copy{pseudogene_counts[gene]}"
             write_fasta(subseq, pseudo_seq_name, "pseudogenes", output_dirs["pseudogenes"], gb_stem)
-            summary_rows.append(["pseudogene", pseudo_seq_name, s, e, strand, len(subseq), gb_file.name])
+
+            start_csv, end_csv = _format_coords_for_csv(s0, e0, strand)
+            summary_rows.append([
+                "pseudogene",
+                pseudo_seq_name,
+                start_csv,
+                end_csv,
+                _strand_symbol(strand),
+                len(subseq),
+                gb_file.name
+            ])
 
             # Spacer boundary label for this pseudogene: like other genes (no 'pseudogene')
             pseudogene_label_counts[gene] += 1
             label_name = (f"{gene}_copy{pseudogene_label_counts[gene]}"
                           if pseudogene_label_counts[gene] > 1 else gene)
-            gene_coords.append((s, e, label_name, strand))
+            gene_coords.append((s0, e0, label_name, strand))
             continue
 
         # skip anything not CDS/tRNA/rRNA
@@ -330,20 +374,20 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
         strand = feat.location.strand
         ftype = feat.type.lower()
 
-        # Special rps12 handling (unchanged)
+        # Special rps12 handling
         if gene == "rps12" and isinstance(feat.location, SeqFeature.CompoundLocation):
             parts = feat.location.parts
             exons = []
             for part in parts:
-                ps, pe = int(part.start), int(part.end)
-                seq = sequence[ps:pe]
+                ps0, pe0 = int(part.start), int(part.end)
+                seq = sequence[ps0:pe0]
                 if part.strand == -1:
                     seq = seq.reverse_complement()
-                exons.append({"start": ps, "end": pe,
-                              "length": pe-ps,
+                exons.append({"start0": ps0, "end0": pe0,
+                              "length": pe0-ps0,
                               "strand": part.strand,
                               "seq": seq})
-            sorted_by_start = sorted(exons, key=lambda x: x["start"])
+            sorted_by_start = sorted(exons, key=lambda x: x["start0"])
             first = sorted_by_start[0]
             largest = max(exons, key=lambda x: x["length"])
             remaining = [e for e in exons if e not in (first, largest)][0]
@@ -352,38 +396,48 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
             for i, ex in enumerate(ordered, 1):
                 lbl = f"{name}_exon{i}"
                 write_fasta(ex["seq"], lbl, "exons", output_dirs["exons"], gb_stem)
+                start_csv, end_csv = _format_coords_for_csv(ex["start0"], ex["end0"], ex["strand"])
                 summary_rows.append([
-                    "rps12_exon", lbl,
-                    ex["start"], ex["end"],
-                    ex["strand"], ex["length"], gb_file.name
+                    "rps12_exon",
+                    lbl,
+                    start_csv,
+                    end_csv,
+                    _strand_symbol(ex["strand"]),
+                    ex["length"],
+                    gb_file.name
                 ])
 
             ex2, ex3 = ordered[1], ordered[2]
-            s, e = sorted([ex2["end"], ex3["start"]])
-            intr_seq = sequence[s:e]
+            s0, e0 = sorted([ex2["end0"], ex3["start0"]])
+            intr_seq = sequence[s0:e0]
             if strand == -1:
                 intr_seq = intr_seq.reverse_complement()
             intr_lbl = f"{name}_intron1"
             write_fasta(intr_seq, intr_lbl, "introns", output_dirs["introns"], gb_stem)
+            start_csv, end_csv = _format_coords_for_csv(s0, e0, strand)
             summary_rows.append([
-                "intron", intr_lbl,
-                s, e, strand,
-                len(intr_seq), gb_file.name
+                "intron",
+                intr_lbl,
+                start_csv,
+                end_csv,
+                _strand_symbol(strand),
+                len(intr_seq),
+                gb_file.name
             ])
 
             for ex in (ordered[0], ordered[2]):
-                up = find_nearest_gene(ex["start"], initial_gene_coords, "upstream")
-                if up and up[1] < ex["start"]:
+                up = find_nearest_gene(ex["start0"], initial_gene_coords, "upstream")
+                if up and up[1] < ex["start0"]:
                     extract_intergenic(
-                        sequence, up[1], ex["start"],
+                        sequence, up[1], ex["start0"],
                         f"{up[2]}_to_{name}_exon_spacer",
                         gb_stem, output_dirs, summary_rows,
                         gb_file.name, extracted_spacer_starts
                     )
-                down = find_nearest_gene(ex["end"], initial_gene_coords, "downstream")
-                if down and ex["end"] < down[0]:
+                down = find_nearest_gene(ex["end0"], initial_gene_coords, "downstream")
+                if down and ex["end0"] < down[0]:
                     extract_intergenic(
-                        sequence, ex["end"], down[0],
+                        sequence, ex["end0"], down[0],
                         f"{name}_exon_to_{down[2]}_spacer",
                         gb_stem, output_dirs, summary_rows,
                         gb_file.name, extracted_spacer_starts
@@ -391,13 +445,22 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
             continue
 
         # Default feature writing for CDS/tRNA/rRNA
-        s, e = int(feat.location.start), int(feat.location.end)
-        subseq = sequence[s:e]
+        s0, e0 = int(feat.location.start), int(feat.location.end)
+        subseq = sequence[s0:e0]
         if strand == -1:
             subseq = subseq.reverse_complement()
         write_fasta(subseq, name, ftype, output_dirs[ftype], gb_stem)
-        summary_rows.append([ftype, name, s, e, strand, len(subseq), gb_file.name])
-        gene_coords.append((s, e, name, strand))
+        start_csv, end_csv = _format_coords_for_csv(s0, e0, strand)
+        summary_rows.append([
+            ftype,
+            name,
+            start_csv,
+            end_csv,
+            _strand_symbol(strand),
+            len(subseq),
+            gb_file.name
+        ])
+        gene_coords.append((s0, e0, name, strand))
 
         # If multi-exon, emit exons and introns
         if ftype in ["cds", "trna"] and isinstance(feat.location, SeqFeature.CompoundLocation):
@@ -405,34 +468,46 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
                            key=lambda x: int(x.start),
                            reverse=(strand == -1))
             for i, part in enumerate(parts, 1):
-                ps, pe = int(part.start), int(part.end)
-                exseq = sequence[ps:pe]
+                ps0, pe0 = int(part.start), int(part.end)
+                exseq = sequence[ps0:pe0]
                 if strand == -1:
                     exseq = exseq.reverse_complement()
                 lbl = f"{name}_exon{i}"
                 write_fasta(exseq, lbl, "exons", output_dirs["exons"], gb_stem)
-                summary_rows.append(["exon", lbl, ps, pe, strand, len(exseq), gb_file.name])
+                start_csv, end_csv = _format_coords_for_csv(ps0, pe0, strand)
+                summary_rows.append([
+                    "exon",
+                    lbl,
+                    start_csv,
+                    end_csv,
+                    _strand_symbol(strand),
+                    len(exseq),
+                    gb_file.name
+                ])
             for i in range(len(parts)-1):
-                a_end = int(parts[i].end)
-                b_start = int(parts[i+1].start)
+                a_end0 = int(parts[i].end)
+                b_start0 = int(parts[i+1].start)
                 if strand == -1:
-                    a_end, b_start = int(parts[i+1].end), int(parts[i].start)
-                if b_start > a_end:
-                    intrseq = sequence[a_end:b_start]
+                    a_end0, b_start0 = int(parts[i+1].end), int(parts[i].start)
+                if b_start0 > a_end0:
+                    intrseq = sequence[a_end0:b_start0]
                     if strand == -1:
                         intrseq = intrseq.reverse_complement()
                     lbl = f"{name}_intron{i+1}"
                     write_fasta(intrseq, lbl, "introns", output_dirs["introns"], gb_stem)
+                    start_csv, end_csv = _format_coords_for_csv(a_end0, b_start0, strand)
                     summary_rows.append([
-                        "intron", lbl,
-                        a_end, b_start, strand,
-                        len(intrseq), gb_file.name
+                        "intron",
+                        lbl,
+                        start_csv,
+                        end_csv,
+                        _strand_symbol(strand),
+                        len(intrseq),
+                        gb_file.name
                     ])
 
-    # ---------------------------
     # 3) Compute intergenic spacers using ALL boundaries (incl. pseudogenes),
     #    but spacer labels never include the word 'pseudogene'
-    # ---------------------------
     outer_coords = get_outer_gene_coords(gene_coords)
     for i in range(len(outer_coords)-1):
         s1, e1, n1, _ = outer_coords[i]
@@ -444,16 +519,16 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
             gb_file.name, extracted_spacer_starts
         )
     if outer_coords:
-        first_s = outer_coords[0][0]
-        last_e  = outer_coords[-1][1]
+        first_s0 = outer_coords[0][0]
+        last_e0  = outer_coords[-1][1]
         extract_intergenic(
-            sequence, 0, first_s,
+            sequence, 0, first_s0,
             "start_to_first_gene_spacer",
             gb_stem, output_dirs, summary_rows,
             gb_file.name, extracted_spacer_starts
         )
         extract_intergenic(
-            sequence, last_e, len(sequence),
+            sequence, last_e0, len(sequence),
             "last_gene_to_end_spacer",
             gb_stem, output_dirs, summary_rows,
             gb_file.name, extracted_spacer_starts
@@ -461,6 +536,10 @@ def process_gb_file(gb_file, output_dirs, summary_rows):
 
     # concatenate any exon pieces written earlier
     concatenate_exons(output_dirs["exons"], gb_stem)
+
+# ---------------------------
+# Main
+# ---------------------------
 
 def main():
     if len(sys.argv) != 3:
@@ -481,7 +560,7 @@ def main():
         print(f"🔍 Processing: {gb_file.name}")
         process_gb_file(gb_file, output_dirs, summary_rows)
 
-    # global summary
+    # global summary (1-based inclusive coordinates; strand as '+' / '-')
     with open(output_dir / "summary.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -491,7 +570,7 @@ def main():
         ])
         writer.writerows(summary_rows)
 
-    # pseudogenes summary
+    # pseudogenes summary (1-based inclusive; strand as '+' / '-')
     pseudogene_rows = [row for row in summary_rows if row[0] == "pseudogene"]
     if pseudogene_rows:
         with open(output_dir / "pseudogenes" / "pseudogenes_summary.csv", "w", newline="") as f:
