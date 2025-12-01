@@ -8,6 +8,6 @@ Recommended: Python 3.9+ and Biopython ≥1.84.
 
 pip install biopython
 
-Citation: Alan T.S., Xiang C. L., Krishnaraj T.P. and Sunojkumar P. (2025) Characterisation and phylogenetic analysis of the complete chloroplast genome of the rare endemic Isodon rivularis (Lamiaceae) from the Western Ghats, Journal of Asia-Pacific Biodiversity, (in press).
+**Citation**: Alan T.S., Xiang C. L., Krishnaraj T.P. and Sunojkumar P. (2025) Characterisation and phylogenetic analysis of the complete chloroplast genome of the rare endemic Isodon rivularis (Lamiaceae) from the Western Ghats, Journal of Asia-Pacific Biodiversity, (in press) https://doi.org/10.1016/j.japb.2025.09.011
 
 **IMPORTANT NOTE**: Check the generated FASTA files for errors. Check transplicing genes, for example, the rps12 gene. Check start and stop codons of protein-coding genes. Remember to avoid the use of synonyms of gene names, for example, rrn4.5, sometimes rrn4.5S; hence, use rrn4.5 in all GenBank files.
